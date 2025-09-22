@@ -11,7 +11,7 @@ import queue
 from silero_vad import load_silero_vad, get_speech_timestamps
 import speech_recognition as sr
 import pyttsx3
-
+import re
 def get_menu(filename="menu.json"):
     try:
         with open(filename, "r", encoding="utf-8") as f:
@@ -34,6 +34,20 @@ client = genai.Client(api_key=api_key)
 menu = get_menu()
 menu_str = "\n".join([f"{item}: ${price:.2f}" for item, price in menu.items()])
 
+def extract_message_and_cart(text):
+    # Find JSON block
+    json_match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+    cart = None
+    if json_match:
+        try:
+            cart = json.loads(json_match.group(1))
+        except Exception:
+            cart = None
+        # Remove JSON block from message
+        message = text.replace(json_match.group(0), '').strip()
+    else:
+        message = text
+    return message, cart
 
 def speak(text):
     # --- TTS engine setup ---
@@ -91,13 +105,22 @@ def recognize_speech_from_mic():
 def main():
     # Use a single 'contents' list with 'parts' and 'role' for Gemini SDK
     contents = [
-        {
-            "role": "user",
-            "parts": [
-                {"text": f"New Session started! You are a friendly coffee shop barista. Here is the menu:\n{menu_str}\nGreet the new customer when they say hello and ask for their order. When they order, confirm the item and quantity, and keep a running cart but dont tell the customer the total until they are done. When the customer is done, immediately summarize the order, return the total price, and end the conversation by saying 'Thank you for your order!'. Only offer items from the menu. Do not ask for more orders after the user is done."}
-            ]
-        }
-    ]
+            {
+                "role": "user",
+                "parts": [
+                    {"text": (
+                        f"New Session started! You are a friendly coffee shop barista for 'Central Perk'. Here is the menu:\n{menu_str}\n"
+                        "Greet the new customer when they say hello and ask for their order. "
+                        "When they order, confirm the item and quantity, and keep a running cart as a JSON object. "
+                        "After each order update, reply with the updated cart in JSON format ```json (key: item, value: quantity)```, "
+                        "and a reply message. Do not tell the customer the total until they are done. "
+                        "When the customer is done, immediately summarize the order, return the total price, "
+                        "and end the conversation by saying 'Thank you for your order!'. "
+                        "Only offer items from the menu. Do not ask for more orders after the user is done."
+                    )}
+                ]
+            }
+        ]
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=contents
@@ -108,6 +131,7 @@ def main():
     })
     print("Barista:", response.text)
     speak(response.text)
+    main_cart = {}
     while True:
         user_input = recognize_speech_from_mic()
         contents.append({
@@ -124,8 +148,12 @@ def main():
             "parts": [{"text": response.text}]
         })
 
-        print("Barista:", response.text)
-        speak(response.text)
+        message, cart = extract_message_and_cart(response.text)
+        if cart:
+            main_cart = cart
+        print("Cart:", main_cart)
+        print("Barista:", message)
+        speak(message)
         if "Thank you for your order" in response.text:
             print("Session ended. Start the script again for a new customer.")
             break
